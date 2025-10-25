@@ -37,6 +37,160 @@ class UILogger:
         self.text_widget.configure(state="disabled")
 
 # ============== WAITERS / HELPERS ==============
+def _is_enabled_vakata_item(driver, a_el):
+    """Một item bật nếu KHÔNG có class disabled/aria-disabled."""
+    try:
+        cls = (a_el.get_attribute("class") or "").lower()
+        aria = (a_el.get_attribute("aria-disabled") or "").lower()
+        li = a_el.find_element(By.XPATH, "./ancestor::li[1]")
+        li_cls = (li.get_attribute("class") or "").lower()
+        return ("disabled" not in cls) and ("disabled" not in li_cls) and (aria not in ["true", "1"])
+    except Exception:
+        return False
+
+def _ensure_node_selected(driver, anchor):
+    """jsTree yêu cầu node được select thì menu mới bật."""
+    try:
+        li = anchor.find_element(By.XPATH, "./ancestor::li[1]")
+        selected = "jstree-clicked" in (anchor.get_attribute("class") or "")
+        if not selected:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", anchor)
+            try:
+                anchor.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", anchor)
+            # chờ chọn xong
+            WebDriverWait(driver, 3).until(
+                lambda d: "jstree-clicked" in (anchor.get_attribute("class") or "")
+                         or "jstree-selected" in (li.get_attribute("class") or "")
+            )
+    except Exception:
+        pass
+
+def _open_context_menu(driver, anchor):
+    """Mở menu ngữ cảnh ổn định."""
+    ActionChains(driver).move_to_element(anchor).pause(0.05).context_click(anchor).perform()
+    # menu visible
+    WebDriverWait(driver, 5).until(EC.visibility_of_element_located((
+        By.XPATH, "//ul[contains(@class,'vakata-context')][contains(@style,'display') and not(contains(@style,'display: none'))]"
+    )))
+
+def context_click_when_enabled(driver, anchor, rel=None, label=None,
+                               total_timeout=30, poll=0.6, logger=None, modal=None):
+    end = time.time() + total_timeout
+    attempt = 0
+    _ensure_node_selected(driver, anchor)
+
+    while time.time() < end:
+        attempt += 1
+        try:
+            _open_context_menu(driver, anchor)
+            menu = driver.find_element(By.XPATH,
+                "//ul[contains(@class,'vakata-context')][contains(@style,'display') and not(contains(@style,'display: none'))]"
+            )
+
+            item = None
+            if rel is not None:
+                els = menu.find_elements(By.CSS_SELECTOR, f"a[rel='{rel}']")
+                if els: item = els[0]
+            if item is None and label:
+                els = menu.find_elements(By.XPATH, f".//a[normalize-space()='{label}']") or \
+                      menu.find_elements(By.XPATH, f".//a[contains(normalize-space(.), '{label}')]")
+                if els: item = els[0]
+
+            if item is None:
+                driver.execute_script("document.body.click();")
+                time.sleep(poll)
+                continue
+
+            if not _is_enabled_vakata_item(driver, item):
+                # 🔁 thử nudge sau 2 lần đầu nếu truyền được modal
+                if attempt >= 2 and modal is not None:
+                    if logger: logger("   (Menu vẫn disabled → thử Next rồi Back để kích hoạt…)")
+                    driver.execute_script("document.body.click();")
+                    if nudge_by_next_back(driver, modal, logger=logger):
+                        # DOM đã refresh → cần lấy lại anchor vì element cũ đã stale
+                        try:
+                            module = modal.find_element(By.CSS_SELECTOR, "#vModuleThiCong[vmodule-name='xulydondangky']")
+                            tree = wait_jstree_ready_in(module, timeout=10)
+                            anchor = find_tt_dangky_anchor(tree)
+                            _ensure_node_selected(driver, anchor)
+                        except Exception:
+                            pass
+                        # quay vòng lặp để mở lại menu
+                        continue
+
+                if logger: logger(f"   (Menu '{label or rel}' disabled, đợi rồi thử lại… lần {attempt})")
+                driver.execute_script("document.body.click();")
+                time.sleep(min(poll * attempt, 2.0))
+                continue
+
+            # bật rồi → click
+            try:
+                item.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", item)
+            return True
+
+        except StaleElementReferenceException:
+            time.sleep(0.2)
+        except Exception:
+            try: driver.execute_script("document.body.click();")
+            except Exception: pass
+            time.sleep(0.2)
+
+    if logger: logger("⚠️ Hết thời gian đợi menu bật, bỏ qua thao tác.")
+    return False
+
+def wait_xuly_modal(driver, timeout=20):
+    """
+    Đợi modal Xử lý đơn đăng ký hiển thị; trả về WebElement modal.
+    Modal có id động bắt đầu bằng 'mdlXuLyDonDangKy-'.
+    """
+    wait = WebDriverWait(driver, timeout)
+    driver.switch_to.default_content()
+    modal = wait.until(EC.visibility_of_element_located((
+        By.CSS_SELECTOR, "div.modal.modal-fullscreen.in[id^='mdlXuLyDonDangKy-'][style*='display: block']"
+    )))
+    # đảm bảo body không còn overlay che click
+    try:
+        WebDriverWait(driver, 5).until(lambda d: d.execute_script("return (window.jQuery? jQuery.active:0)") == 0)
+    except Exception:
+        pass
+    return modal
+
+def wait_jstree_ready_in(container_el, timeout=20):
+    """
+    Đợi #treeDonDangKy trong container có ít nhất một anchor khác 'Không có dữ liệu'.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        trees = container_el.find_elements(By.CSS_SELECTOR, "#treeDonDangKy")
+        if trees:
+            anchors = trees[0].find_elements(By.CSS_SELECTOR, "a.jstree-anchor")
+            if anchors:
+                if not (len(anchors) == 1 and "Không có dữ liệu" in (anchors[0].text or "")):
+                    return trees[0]
+        time.sleep(0.2)
+    raise TimeoutException("jsTree chưa có dữ liệu trong thời gian cho phép.")
+
+def find_tt_dangky_anchor(tree_el):
+    """
+    Trả về <a> node 'Thông tin đăng ký' (trong đó text ở <b> bên trong).
+    Linh hoạt với phần tử phụ như <div id='elementStatus'>.
+    """
+    xpaths = [
+        ".//a[.//b[normalize-space()='Thông tin đăng ký']]",                     # case phổ biến
+        ".//a[normalize-space()='Thông tin đăng ký']",                           # đôi khi text flatten
+        ".//a[contains(normalize-space(.), 'Thông tin đăng ký')]",               # lỏng
+    ]
+    for xp in xpaths:
+        els = tree_el.find_elements(By.XPATH, xp)
+        if els:
+            return els[0]
+    raise NoSuchElementException("Không tìm thấy anchor 'Thông tin đăng ký' trong jsTree.")
+
+
 def wait_page_idle(driver, wait, extra_ms=300):
     wait.until(lambda x: x.execute_script("return document.readyState") == "complete")
     time.sleep(extra_ms/1000.0)
@@ -268,23 +422,86 @@ def handle_whole_page_action(driver, logger: UILogger, table_id="tblTTThuaDat", 
 
     return selected_count
 
-def quick_confirm_if_present(driver, soft_timeout=1.0):
-    sw = WebDriverWait(driver, soft_timeout)
-    els = driver.find_elements(By.CSS_SELECTOR, ".swal2-confirm")
-    if els:
-        sw.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".swal2-confirm"))).click()
-        return True
-    sel = ".modal.show .btn-primary, .modal.in .btn-primary, .bootbox .btn-primary"
-    els = driver.find_elements(By.CSS_SELECTOR, sel)
-    if els:
-        sw.until(EC.element_to_be_clickable((By.CSS_SELECTOR, sel))).click()
-        return True
-    xp = "//button[contains(., 'Đồng ý') or contains(., 'Xác nhận') or contains(., 'OK')]"
-    els = driver.find_elements(By.XPATH, xp)
-    if els:
-        sw.until(EC.element_to_be_clickable((By.XPATH, xp))).click()
-        return True
-    return False
+def quick_confirm_if_present(driver, root_el=None, soft_timeout=1.2):
+    """
+    Tìm & bấm nút xác nhận nếu có (SweetAlert2/Bootstrap). KHÔNG raise TimeoutException.
+    Trả về True nếu đã bấm xác nhận; False nếu không thấy gì để bấm.
+    root_el: nếu truyền modal WebElement, chỉ tìm trong đó (ổn định hơn).
+    """
+    try:
+        scope = root_el if root_el is not None else driver
+        sw = WebDriverWait(driver, soft_timeout)
+
+        # 1) SweetAlert2 .swal2-confirm
+        btns = scope.find_elements(By.CSS_SELECTOR, ".swal2-container .swal2-confirm")
+        if not btns:
+            # 2) Bootstrap modal primary
+            btns = scope.find_elements(By.CSS_SELECTOR, ".modal.in .btn-primary, .modal.show .btn-primary")
+
+        if not btns:
+            # 3) Theo text tiếng Việt/English phổ biến
+            xp = ".//button[normalize-space()='Đồng ý' or normalize-space()='Xác nhận' or normalize-space()='OK' or normalize-space()='Có' or normalize-space()='Yes']"
+            try:
+                btns = scope.find_elements(By.XPATH, xp)
+            except Exception:
+                btns = []
+
+        if not btns:
+            # Không thấy gì → coi như không có confirm
+            return False
+
+        # Chọn nút hiển thị được
+        cand = None
+        for b in btns:
+            try:
+                vis = driver.execute_script("""
+                    const el = arguments[0];
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none';
+                """, b)
+                if vis:
+                    cand = b
+                    break
+            except Exception:
+                continue
+        if cand is None:
+            return False
+
+        # Đảm bảo không bị backdrop che
+        try:
+            driver.execute_script("""
+                document.querySelectorAll('.modal-backdrop, .swal2-container, .jquery-loading-modal__bg')
+                    .forEach(el=>{ el.style.pointerEvents='auto'; });
+            """)
+        except Exception:
+            pass
+
+        # Thử click thường
+        try:
+            cand.click()
+            return True
+        except Exception:
+            pass
+
+        # Thử JS click
+        try:
+            driver.execute_script("arguments[0].click();", cand)
+            return True
+        except Exception:
+            pass
+
+        # Thử phím Enter vào phần tử đang focus/active
+        try:
+            driver.switch_to.active_element.send_keys(Keys.ENTER)
+            return True
+        except Exception:
+            pass
+
+        return False
+    except Exception:
+        # Tuyệt đối không để propagate TimeoutException từ waits bên trong
+        return False
 
 def wait_processing_quick(driver, table_id="tblTTThuaDat", max_wait=6):
     def cond(d):
@@ -413,134 +630,327 @@ def switch_to_frame_having(driver, by, value, timeout=8):
     driver.switch_to.default_content()
     return False
 
-def context_click_jstree_pick(driver, wait, anchor_id="j34_1_anchor",
-                              menu_text="Thêm vào dữ liệu vận hành", logger=None):
-    # 1) Đảm bảo đang ở frame có anchor
-    def switch_to_frame_having(by, value, timeout=8):
-        driver.switch_to.default_content()
+def context_click_jstree_pick(driver, wait, node_text: str,
+                              menu_text: str, logger: UILogger = None):
+    """
+    Tìm một node trong cây jstree theo text, nhấp chuột phải và chọn menu.
+    """
+    anchor_xpath = f"//a[contains(@class, 'jstree-anchor') and normalize-space(.)='{node_text}']"
+
+    # 1) Đảm bảo đang ở frame có node cần tìm
+    if not switch_to_frame_having(driver, By.XPATH, anchor_xpath, timeout=8):
+        # Nếu không thấy, thử chuyển đến frame bất kỳ có jstree
+        switched = switch_to_frame_having(driver, By.CLASS_NAME, "jstree-anchor", timeout=5)
+        if not switched and logger:
+            logger.log(f"⚠️ Không tìm thấy iframe chứa jstree hoặc node '{node_text}'.")
+
+    # 2) Mở rộng cây thư mục để đảm bảo node nhìn thấy được
+    try:
+        # Dùng presence_of_element_located để lấy element ngay cả khi nó chưa visible
+        anchor_for_script = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, anchor_xpath)))
+        driver.execute_script(""" 
+            try {
+                var a = arguments[0];
+                if (!a) return;
+                var li = a.closest('li');
+                var tree = li.closest('.jstree, .jstree-default, .jstree-container-ul');
+                var inst = (window.jQuery && tree) ? jQuery(tree).jstree(true) : null;
+                if (inst) {
+                    // Mở tất cả các node cha để đảm bảo node con hiển thị
+                    inst.open_node(li, null, true); 
+                }
+            } catch(e) { console.error('Jstree open_node failed:', e); }
+        """, anchor_for_script)
+        time.sleep(0.5) # Chờ animation mở cây
+    except TimeoutException:
+        if logger:
+            logger.log(f"   (Không tìm thấy node '{node_text}' để mở rộng, có thể nó đã hiển thị hoặc tên node không đúng)")
+
+    # 3) Lấy anchor và thực hiện context click
+    try:
+        anchor = wait.until(EC.visibility_of_element_located((By.XPATH, anchor_xpath)))
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", anchor) # Cuộn vào view
+        wait.until(EC.element_to_be_clickable((By.XPATH, anchor_xpath))) # Chờ có thể click
+        ActionChains(driver).context_click(anchor).perform()
+    except TimeoutException as e:
+        if logger:
+            logger.log(f"❌ Không thể tìm thấy hoặc tương tác với node '{node_text}' sau khi chờ.")
+            logger.log("   Gợi ý: Kiểm tra lại tên node, hoặc đảm bảo nó không bị che khuất.")
+        raise e # Ném lại lỗi để dừng script
+
+    # 4) Chờ menu vakata hiện + click item theo text
+    wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "ul.vakata-context")))
+    # Dùng normalize-space để match chính xác text, tránh lỗi khoảng trắng
+    item_xpath = f"//ul[contains(@class,'vakata-context')]//a[normalize-space(.)='{menu_text}']"
+    
+    try:
+        # Thử chờ click được trước
+        item = wait.until(EC.element_to_be_clickable((By.XPATH, item_xpath)))
+        item.click()
+    except (TimeoutException, ElementClickInterceptedException) as e:
+        # Nếu không click được, thử tìm sự hiện diện và click bằng JS
+        if logger:
+            logger.log(f"   (Không thể click trực tiếp menu '{menu_text}', thử click bằng Javascript. Lỗi: {e.__class__.__name__})")
         try:
-            if driver.find_elements(by, value):
-                return True
-        except: pass
-        import time
-        deadline = time.time() + timeout
-        frames = driver.find_elements(By.TAG_NAME, "iframe")
-        for i in range(len(frames)):
-            if time.time() > deadline: break
-            driver.switch_to.default_content()
-            frames = driver.find_elements(By.TAG_NAME, "iframe")
-            try:
-                driver.switch_to.frame(frames[i])
-                if driver.find_elements(by, value):
-                    return True
-                inner = driver.find_elements(By.TAG_NAME, "iframe")
-                for j in range(len(inner)):
-                    driver.switch_to.frame(inner[j])
-                    if driver.find_elements(by, value):
-                        return True
-                    driver.switch_to.parent_frame()
-            except:
-                continue
-        driver.switch_to.default_content()
+            # Chờ element có trong DOM, không cần visible hoặc clickable
+            item = wait.until(EC.presence_of_element_located((By.XPATH, item_xpath)))
+            driver.execute_script("arguments[0].click();", item)
+        except TimeoutException:
+            if logger:
+                logger.log(f"   (Không tìm thấy menu '{menu_text}' ngay cả với Javascript.)")
+            raise # Ném lại lỗi gốc
+
+def extract_ma_don_from_tree(tree_el):
+    """
+    Từ #treeDonDangKy, lấy chuỗi 'Mã đơn: ...' (phục vụ so sánh khi chuyển hồ sơ).
+    """
+    try:
+        el = tree_el.find_element(By.XPATH, ".//a[starts-with(normalize-space(.), 'Mã đơn:')]")
+        return (el.text or "").strip()
+    except Exception:
+        # fallback: ráp text toàn cây (ít tin cậy hơn)
+        try:
+            return (tree_el.text or "").strip()
+        except Exception:
+            return ""
+    
+def click_step_backward(modal):
+    """Nhấn nút '◀' (btnStepBackward)."""
+    try:
+        btn = modal.find_element(By.ID, "btnStepBackward")
+    except NoSuchElementException:
+        return False
+    try:
+        dis_attr = btn.get_attribute("disabled")
+        cls = (btn.get_attribute("class") or "").lower()
+        if (dis_attr is not None) or ("disabled" in cls):
+            return False
+    except Exception:
+        pass
+    try:
+        modal.parent.execute_script("arguments[0].click();", btn)
+    except Exception:
+        try: btn.click()
+        except Exception: return False
+    return True
+
+def nudge_by_next_back(driver, modal, logger=None, change_timeout=12):
+    """
+    Thử Next -> chờ đổi hồ sơ -> Back về hồ sơ cũ (hoặc ngược lại nếu không Next được).
+    Trả về True nếu đã đi-về thành công (DOM được refresh).
+    """
+    def log(m): 
+        (logger and logger(m))
+
+    try:
+        ma0 = current_ma_don_in_thicong(modal, timeout=8)
+    except Exception:
+        ma0 = ""
+
+    # Ưu tiên Next→Back
+    if click_step_forward(modal):
+        # đợi đổi hồ sơ
+        try:
+            WebDriverWait(driver, change_timeout).until(
+                lambda d: (lambda x: x and x != ma0)(current_ma_don_in_thicong(modal, timeout=8))
+            )
+        except TimeoutException:
+            # không đổi được → coi như fail
+            try: click_step_backward(modal)
+            except Exception: pass
+            return False
+
+        # quay lại hồ sơ cũ
+        if not click_step_backward(modal):
+            return False
+        # đợi về lại ma0
+        try:
+            WebDriverWait(driver, change_timeout).until(
+                lambda d: current_ma_don_in_thicong(modal, timeout=8) == ma0
+            )
+        except TimeoutException:
+            return False
+
+        log and log("   ↩️ Đã nudge Next→Back để refresh trạng thái.")
+        return True
+
+    # Nếu không Next được, thử Back→Next
+    if click_step_backward(modal):
+        try:
+            WebDriverWait(driver, change_timeout).until(
+                lambda d: (lambda x: x and x != ma0)(current_ma_don_in_thicong(modal, timeout=8))
+            )
+        except TimeoutException:
+            # quay lại vị trí cũ nếu có thể
+            try: click_step_forward(modal)
+            except Exception: pass
+            return False
+
+        if not click_step_forward(modal):
+            return False
+        try:
+            WebDriverWait(driver, change_timeout).until(
+                lambda d: current_ma_don_in_thicong(modal, timeout=8) == ma0
+            )
+        except TimeoutException:
+            return False
+
+        log and log("   ↩️ Đã nudge Back→Next để refresh trạng thái.")
+        return True
+
+    return False
+
+def current_ma_don_in_thicong(modal, timeout=15):
+    """Đọc 'Mã đơn:' hiện tại từ module Thi công."""
+    module_thicong = modal.find_element(By.CSS_SELECTOR, "#vModuleThiCong[vmodule-name='xulydondangky']")
+    tree = wait_jstree_ready_in(module_thicong, timeout=timeout)
+    return extract_ma_don_from_tree(tree)
+
+
+def process_current_record(driver, wait, logger, modal):
+    """
+    - Thi công: Thêm vào dữ liệu vận hành (rel=2).
+    - Vận hành: Cập nhật lịch sử tất cả (rel=4).
+    """
+    # Lấy lại 2 module mỗi vòng (DOM có thể thay đổi sau khi chuyển hồ sơ)
+    module_thicong  = modal.find_element(By.CSS_SELECTOR, "#vModuleThiCong[vmodule-name='xulydondangky']")
+    module_vanhanh  = modal.find_element(By.CSS_SELECTOR, "#vModuleVanHanh[vmodule-name='xulydondangky']")
+
+    # 1) Đợi jsTree có dữ liệu
+    tree_thicong = wait_jstree_ready_in(module_thicong, timeout=30)
+    tree_vanhanh = wait_jstree_ready_in(module_vanhanh, timeout=30)
+
+    # Thi công → 'Thêm vào dữ liệu vận hành' (rel=2)
+    anchor_tc = find_tt_dangky_anchor(tree_thicong)
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", anchor_tc)
+    ok = context_click_when_enabled(driver, anchor_tc, rel=2, label="Thêm vào dữ liệu vận hành",
+                                    total_timeout=35, poll=0.7, logger=logger.log)
+    if ok:
+        quick_confirm_if_present(driver, root_el=modal, soft_timeout=1.8)
+    else:
+        logger.log("❌ Không thể bật 'Thêm vào dữ liệu vận hành' trong thời gian cho phép.")
+    
+    time.sleep(0.5)  # Chờ một chút trước khi xử lý phần Vận hành
+
+    # Vận hành → 'Cập nhật lịch sử tất cả' (rel=4)
+    anchor_vh = find_tt_dangky_anchor(tree_vanhanh)
+    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", anchor_vh)
+    ok = context_click_when_enabled(driver, anchor_vh, rel=4, label="Cập nhật lịch sử tất cả",
+                                    total_timeout=35, poll=0.7, logger=logger.log)
+    if ok:
+        quick_confirm_if_present(driver, root_el=modal, soft_timeout=1.8)
+    else:
+        logger.log("❌ Không thể bật 'Cập nhật lịch sử tất cả' trong thời gian cho phép.")
+
+    time.sleep(0.5)  # Chờ một chút trước khi bấm bước tiếp
+
+
+def click_step_forward(modal):
+    """
+    Nhấn nút '▶' (btnStepForward) trong modal. Trả về False nếu nút bị disable.
+    """
+    try:
+        btn = modal.find_element(By.ID, "btnStepForward")
+    except NoSuchElementException:
         return False
 
-    switch_to_frame_having(By.ID, anchor_id, timeout=8)
-
-    anchor = wait.until(EC.presence_of_element_located((By.ID, anchor_id)))
-    # 2) Lấy node <li> và container tree có size > 0
-    li = anchor.find_element(By.XPATH, "./ancestor::li[1]")
-    # Container ứng viên theo thứ tự dễ gặp
-    candidates = [
-        "./ancestor::*[contains(@class,'jstree-default')][1]",
-        "./ancestor::*[contains(@class,'jstree')][1]",
-        "./ancestor::*[contains(@class,'jstree-container-ul')][1]",
-        "./ancestor::ul[1]"
-    ]
-    tree = None
-    for xp in candidates:
-        try:
-            e = anchor.find_element(By.XPATH, xp)
-            vis = driver.execute_script("""
-                const el=arguments[0], r=el.getBoundingClientRect(), s=getComputedStyle(el);
-                return {w:r.width, h:r.height, ok:(r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden')};
-            """, e)
-            if vis["ok"]:
-                tree = e
-                break
-        except: pass
-    if tree is None:
-        # fallback: dùng chính body
-        tree = driver.find_element(By.TAG_NAME, "body")
-
-    # 3) Left-click để select node (tăng xác suất menu hiện đúng)
+    # Nếu bị disable (thuộc tính disabled hoặc class chứa 'disabled')
     try:
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", anchor)
-        anchor.click()
-    except Exception:
-        # click JS nếu anchor không tương tác được
-        try: driver.execute_script("arguments[0].click();", anchor)
-        except: pass
-
-    # 4) Right-click: ưu tiên vào <li>, nếu size 0 thì context trên container với offset
-    import math, time as _t
-    size_li = driver.execute_script("""
-        const el=arguments[0], r=el.getBoundingClientRect(), s=getComputedStyle(el);
-        return {w:r.width, h:r.height, ok:(r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden'),
-                cx:r.left + r.width/2, cy:r.top + Math.min(18, Math.max(10, r.height/2))};
-    """, li)
-    actions = ActionChains(driver)
-
-    if size_li["ok"]:
-        actions.context_click(li).perform()
-    else:
-        # dùng container tree
-        rect = driver.execute_script("""
-            const el=arguments[0], r=el.getBoundingClientRect();
-            return {cx:r.left + r.width/2, cy:r.top + 40};
-        """, tree)
-        # reset pointer rồi move theo tọa độ tuyệt đối
-        actions.move_by_offset(1,1).perform()
-        # Selenium move_by_offset là tương đối so với vị trí hiện tại → dùng JS để bắn event native nếu cần
-        try:
-            actions.move_by_offset(int(rect["cx"]), int(rect["cy"])).context_click().perform()
-        except Exception:
-            driver.execute_script("""
-                const el=arguments[0]; const p=arguments[1];
-                const evt = new MouseEvent('contextmenu',{bubbles:true,cancelable:true,view:window,
-                    clientX:p.cx, clientY:p.cy, button:2});
-                el.dispatchEvent(evt);
-            """, tree, rect)
-    _t.sleep(0.3)  # cho menu render
-
-    # 5) Nếu vẫn chưa thấy menu, gọi jsTree API show_contextmenu
-    try:
-        driver.execute_script("""
-            try{
-              var a=document.getElementById(arguments[0]);
-              if(!a) return;
-              var inst=null;
-              if(window.jQuery){
-                inst = jQuery(a).closest('.jstree-default,.jstree,.jstree-container-ul').jstree(true);
-              }
-              if(inst){
-                var li = a.closest('li');
-                inst.show_contextmenu(li||a);
-              }
-            }catch(e){}
-        """, anchor_id)
+        dis_attr = btn.get_attribute("disabled")
+        cls = btn.get_attribute("class") or ""
+        if (dis_attr is not None) or ("disabled" in cls.lower()):
+            return False
     except Exception:
         pass
 
-    # 6) Chờ menu vakata hiện + click item theo text (dùng contains thay vì so khớp tuyệt đối)
-    wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, "ul.vakata-context")))
-    item = wait.until(EC.element_to_be_clickable(
-        (By.XPATH, "//ul[contains(@class,'vakata-context')]//a[contains(., 'Thêm vào dữ liệu vận hành')]")
-    ))
     try:
-        item.click()
+        modal.parent.execute_script("arguments[0].click();", btn)
     except Exception:
-        driver.execute_script("arguments[0].click();", item)
+        try:
+            btn.click()
+        except Exception:
+            return False
+    return True
 
+
+def wait_ajax_idle(driver, max_wait=15, check_interval=0.3, log=None):
+    """
+    Đợi cho tất cả các request AJAX / fetch / loading overlay kết thúc.
+    Hỗ trợ cả jQuery, fetch, axios, và các modal overlay phổ biến.
+    - driver: WebDriver
+    - max_wait: thời gian tối đa (giây)
+    - check_interval: thời gian chờ giữa các lần kiểm tra
+    - log: hàm log (nếu có)
+    """
+    start = time.time()
+    last_busy = True
+
+    def is_idle():
+        try:
+            return driver.execute_script("""
+                const jqActive = window.jQuery ? jQuery.active : 0;
+                const netIdle = (
+                    !(window.pendingFetchCount > 0) &&
+                    !(window.pendingXHRCount > 0)
+                );
+                const modals = document.querySelectorAll('.modal-backdrop.in, .swal2-container, .jquery-loading-modal, .loading-overlay, .blockUI');
+                const hasVisibleModal = Array.from(modals).some(m => {
+                    const s = getComputedStyle(m);
+                    return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+                });
+                return (jqActive === 0 && netIdle && !hasVisibleModal);
+            """)
+        except Exception:
+            return True  # Nếu script lỗi (chưa có jQuery chẳng hạn) → coi như idle
+
+    # Hook global counter cho fetch / XHR nếu chưa có
+    try:
+        driver.execute_script("""
+            if (!window.__ajaxHookInstalled) {
+                window.__ajaxHookInstalled = true;
+                window.pendingFetchCount = 0;
+                window.pendingXHRCount = 0;
+
+                const origFetch = window.fetch;
+                if (origFetch) {
+                    window.fetch = function(...args) {
+                        window.pendingFetchCount++;
+                        return origFetch(...args)
+                            .finally(() => window.pendingFetchCount--);
+                    };
+                }
+
+                const origOpen = XMLHttpRequest.prototype.open;
+                const origSend = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.open = function(...args) {
+                    this.__ajax = true;
+                    return origOpen.apply(this, args);
+                };
+                XMLHttpRequest.prototype.send = function(...args) {
+                    if (this.__ajax) window.pendingXHRCount++;
+                    this.addEventListener('loadend', () => window.pendingXHRCount--);
+                    return origSend.apply(this, args);
+                };
+            }
+        """)
+    except Exception:
+        pass
+
+    while time.time() - start < max_wait:
+        idle = is_idle()
+        if idle:
+            if last_busy:
+                last_busy = False
+                idle_since = time.time()
+            elif time.time() - idle_since >= 0.8:  # ổn định ít nhất 0.8s
+                return True
+        else:
+            last_busy = True
+        time.sleep(check_interval)
+
+    if log:
+        log("⚠️ Hết thời gian chờ AJAX.")
+    raise TimeoutException("AJAX requests không idle sau {:.1f}s".format(max_wait))
 # ============== BOT CORE ==============
 def run_bot(username, password, code, start_page, logger: UILogger):
     driver = None
@@ -549,7 +959,7 @@ def run_bot(username, password, code, start_page, logger: UILogger):
         options = Options()
         options.add_argument("--start-maximized")
         # Tự động accept bất kỳ alert/prompt nào không xử lý:
-        service = Service(r"D:\Python\chromedriver\chromedriver-win64\chromedriver-win64\chromedriver.exe")
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         wait = WebDriverWait(driver, 20)
 
@@ -580,17 +990,62 @@ def run_bot(username, password, code, start_page, logger: UILogger):
         wait.until(EC.element_to_be_clickable((By.ID, "drop1"))).click()
         wait.until(EC.element_to_be_clickable((By.ID, "btnXemDanhSach"))).click()
 
-        # Sử dụng JavaScript để click, tránh lỗi bị che khuất
+        # Bấm 'Xử lý đơn'
         btn_xu_ly = wait.until(EC.presence_of_element_located((By.ID, "btnXuLyDon")))
         driver.execute_script("arguments[0].scrollIntoView(true);", btn_xu_ly)
         driver.execute_script("arguments[0].click();", btn_xu_ly)
 
-        # 2️⃣ Nhấp chuột phải và chọn menu
-        context_click_jstree_pick(driver, wait,
-            anchor_id="j34_1_anchor",
-            menu_text="Thêm vào dữ liệu vận hành",
-            logger=logger
-        )
+        logger.log("⏳ Đợi modal 'Xử lý đơn đăng ký' hiển thị…")
+        modal = wait_xuly_modal(driver, timeout=25)
+
+        logger.log("🔁 Bắt đầu duyệt tuần tự từng hồ sơ (StepForward)…")
+
+        # Lấy Mã đơn ban đầu để so sánh khi chuyển hồ sơ
+        module_thicong  = modal.find_element(By.CSS_SELECTOR, "#vModuleThiCong[vmodule-name='xulydondangky']")
+        tree_thicong    = wait_jstree_ready_in(module_thicong, timeout=30)
+        current_ma_don  = extract_ma_don_from_tree(tree_thicong)
+
+        index = 1
+        while True:
+            logger.log(f"— Hồ sơ #{index}: {current_ma_don or '(không rõ)'}")
+            # 1) Xử lý hồ sơ hiện tại
+            try:
+                process_current_record(driver, wait, logger, modal)
+                logger.log("   ✓ Đã thêm vào dữ liệu vận hành & cập nhật lịch sử")
+            except Exception as e:
+                logger.log(f"   ⚠️ Lỗi khi xử lý hồ sơ: {e.__class__.__name__}: {e}. Tiếp tục hồ sơ kế tiếp…")
+
+            # 2) Thử sang hồ sơ kế tiếp
+            #    Nếu nút StepForward disable → dừng.
+            if not click_step_forward(modal):
+                logger.log("⛔ Hết hồ sơ (nút ▶ bị vô hiệu). Kết thúc.")
+                break
+
+            # 3) Đợi jsTree thay đổi (tức là Mã đơn mới)
+            try:
+                WebDriverWait(driver, 20).until(lambda d: (
+                    (lambda md: md != current_ma_don and md != "")(
+                        extract_ma_don_from_tree(
+                            wait_jstree_ready_in(
+                                modal.find_element(By.CSS_SELECTOR, "#vModuleThiCong[vmodule-name='xulydondangky']"),
+                                timeout=15
+                            )
+                        )
+                    )
+                ))
+            except TimeoutException:
+                # Không đổi được mã đơn → coi như đã ở cuối danh sách
+                logger.log("⛔ Không chuyển được sang hồ sơ mới (Mã đơn không đổi). Kết thúc.")
+                break
+
+            # 4) Cập nhật mã đơn & lặp tiếp
+            module_thicong = modal.find_element(By.CSS_SELECTOR, "#vModuleThiCong[vmodule-name='xulydondangky']")
+            tree_thicong   = wait_jstree_ready_in(module_thicong, timeout=20)
+            current_ma_don = extract_ma_don_from_tree(tree_thicong)
+            index += 1
+
+        logger.log("✅ Hoàn tất toàn bộ hồ sơ trong phiên.")
+
 
     except Exception as ex:
         logger.log(f"❌ Có lỗi xảy ra: {ex}")
