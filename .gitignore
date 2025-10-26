@@ -1,0 +1,22 @@
+# Bỏ qua thư mục
+venv/
+__pycache__/
+node_modules/
+dist/
+build/
+
+# Bỏ qua file tạm hoặc log
+*.log
+*.tmp
+*.bak
+*.swp
+
+# Bỏ qua file cấu hình cá nhân
+.env
+.env.local
+*.sqlite3
+*.db
+
+# Bỏ qua file hệ thống
+.DS_Store
+Thumbs.db
