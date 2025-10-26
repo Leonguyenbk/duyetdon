@@ -389,6 +389,37 @@ def go_next_datatables(driver, table_id="tblTTThuaDat", timeout=15):
             pass
     return True
 
+def wait_datatable_reload(driver, table_id="tblDanhSachGoiTinDongBo_info", timeout=10):
+    """Đợi DataTable load xong sau khi bấm 'Tìm kiếm'."""
+    driver.switch_to.default_content()
+    try:
+        # 1️⃣ Đợi phần tử _processing xuất hiện
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, f"{table_id}_processing"))
+        )
+    except TimeoutException:
+        pass
+
+    # 2️⃣ Rồi đợi nó biến mất
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.invisibility_of_element_located((By.ID, f"{table_id}_processing"))
+        )
+    except TimeoutException:
+        pass
+
+    # 3️⃣ Đợi vài dòng đầu tiên xuất hiện
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, f"#{table_id} tbody tr"))
+        )
+    except TimeoutException:
+        pass
+
+    # 4️⃣ Delay nhỏ để đảm bảo text trong _info được cập nhật
+    time.sleep(0.5)
+
+
 def handle_whole_page_action(driver, logger: UILogger, table_id="tblTTThuaDat", timeout=15):
     wait = WebDriverWait(driver, timeout)
     wait.until(EC.presence_of_element_located((By.ID, table_id)))
@@ -1010,6 +1041,7 @@ def open_filter_and_select_status(driver, wait, status_value: str, logger=None, 
     driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_search)
     try: btn_search.click()
     except Exception: driver.execute_script("arguments[0].click();", btn_search)
+    wait_datatable_reload(driver, table_id="tblDanhSachGoiTinDongBo_info", timeout=10)
 
     # Chờ bảng load lại
     try:
@@ -1150,9 +1182,7 @@ def recover_close_resubmit_reopen(driver, wait, logger):
     logger and logger.log("   ↪️ Đóng modal " + ("✓" if ok else "✗ (không mở/đóng không được)"))
 
     _ = resubmit_current_search_if_present(driver, wait, logger)
-    wait_for_table_loaded(driver, table_id="tblTraCuuDotBanGiao", timeout=20)
-    time.sleep(1.0)
-
+    wait_datatable_reload(driver, table_id="tblDanhSachGoiTinDongBo_info", timeout=10)
     remaining_after = get_total_records_from_info(driver, info_id="tblDanhSachGoiTinDongBo_info")
     logger and logger.log(f"   📊 Sau refresh: còn {remaining_after if remaining_after else 0} hồ sơ trong danh sách hiện tại.")
 
