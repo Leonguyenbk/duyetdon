@@ -1338,37 +1338,25 @@ def run_phase(driver, wait, logger, phase_name: str, status_value: str, phase_ke
         logger.log(f"   ✅ Tiến độ {phase_name}: {phase_processed}/{phase_total}")
         if progress_cb: progress_cb(f"{phase_name}: {phase_processed}/{phase_total}")
 
-        # === NEW: Cứ 5 hồ sơ thì reset modal 1 lần để đảm bảo tính chính xác ===
-        if phase_processed > 0 and phase_processed % 5 == 0 and phase_processed < phase_total:
-            logger.log(f"   🔄 Đã xử lý {phase_processed} hồ sơ. Reset modal để làm mới danh sách.")
-            modal2, remaining_after = recover_close_resubmit_reopen(driver, wait, logger, status_value=status_value)
-
-            if remaining_after == 0:
-                logger.log(f"✅ Đã duyệt xong '{phase_name}' sau khi reset. Tổng đã xử lý: ~{phase_processed}.")
-                try: ensure_close_xuly_modal(driver, hard_timeout=5)
-                except Exception: pass
-                if progress_cb: progress_cb(f"{phase_name}: {phase_processed}/{phase_processed}")
-                return phase_processed
-
-            # Còn hồ sơ: reset lại bộ đếm để bắt đầu lại với danh sách mới
-            phase_total = remaining_after
-            phase_processed = 0
-            logger.log(f"   🔄 Reset bộ đếm. Bắt đầu lại từ 0/{phase_total}.")
-            if progress_cb: progress_cb(f"{phase_name}: 0/{phase_total}")
-
-            if modal2 is None:
-                logger.log("   ⛔ Không mở lại modal được sau khi reset. Kết thúc giai đoạn hiện tại.")
-                return phase_processed
-            modal = modal2
-            continue
-
         # === NEW: đủ số hồ sơ theo bộ đếm → kết thúc phase ngay ===
         if phase_processed >= phase_total:
             logger.log(f"🏁 Đã duyệt đủ {phase_total}/{phase_total} cho '{phase_name}'. Đóng modal & chuyển phase.")
             try:
                 ensure_close_xuly_modal(driver, hard_timeout=5)
-            except Exception as e:
-                logger.log(f"   (Lỗi khi đóng modal cuối phase: {e.__class__.__name__})")
+            except Exception:
+                pass
+            
+            # Mở lại form tìm kiếm để chuẩn bị cho phase sau
+            try:
+                logger.log("🔍 Mở lại 'Tìm kiếm mở rộng' để chuẩn bị cho phase tiếp theo...")
+                btn_filter = wait.until(EC.element_to_be_clickable((By.ID, "btnShowFormSearchDSDDK")))
+                form_search = driver.find_element(By.ID, "formSearchDSDDK")
+                if not form_search.is_displayed():
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn_filter)
+                    driver.execute_script("arguments[0].click();", btn_filter)
+                    time.sleep(0.5)
+            except Exception:
+                logger.log("   (Không thể mở lại form tìm kiếm mở rộng.)")
             return phase_processed  # ← nhảy ra để run_bot chạy phase kế tiếp
 
         # Nếu chưa đủ số lượng theo tổng ban đầu, vẫn cần Next sang bản ghi sau
