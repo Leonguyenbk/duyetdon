@@ -859,6 +859,39 @@ def wait_status_both(modal, timeout=20):
 
     return seen_plus, seen_refresh
 
+def _status_visible(modal, kind: str) -> bool:
+    """
+    kind: 'refresh' | 'plus'
+    Kiểm tra còn hiển thị badge trong #elementStatus hay không (có thể có nhiều div trùng id).
+    """
+    if kind == "refresh":
+        xp = ".//div[@id='elementStatus']//span[i[contains(@class,'fa-refresh')] or contains(normalize-space(.), 'Cập nhật lịch sử')]"
+    else:  # 'plus'
+        xp = ".//div[@id='elementStatus']//span[i[contains(@class,'fa-plus')] or contains(normalize-space(.), 'Thêm vào dữ liệu vận hành')]"
+    try:
+        spans = modal.find_elements(By.XPATH, xp)
+        for sp in spans:
+            try:
+                if sp.is_displayed():
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        return False
+
+def wait_status_gone(modal, kind: str = "refresh", timeout: int = 20) -> bool:
+    """
+    Chờ cho badge tương ứng biến mất (không còn visible).
+    kind: 'refresh' (Cập nhật lịch sử) | 'plus' (Thêm vào dữ liệu vận hành)
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if not _status_visible(modal, kind):
+            return True
+        time.sleep(0.2)
+    return not _status_visible(modal, kind)
+
 def process_current_record(driver, wait, logger, modal, phase_key=None):
     """
     Xử lý 1 hồ sơ trong modal.
@@ -884,12 +917,16 @@ def process_current_record(driver, wait, logger, modal, phase_key=None):
                 driver.execute_script("arguments[0].scrollIntoView({block:'center'});", anchor_vh0)
                 ok_boduyet = context_click_when_enabled(
                     driver, anchor_vh0,
-                    rel=None, label="Bỏ duyệt",  # menu có id=btnBoDuyetTTTD, text = 'Bỏ duyệt'
+                    rel=None, label="Bỏ duyệt",
                     logger=logger.log, modal=modal
                 )
                 if ok_boduyet:
                     quick_ack_any_popup(driver, root_el=modal)
                     logger.log("     ✓ Hoàn tất B0: Bỏ duyệt.")
+                    # ✨ NEW: chờ badge 'Cập nhật lịch sử' tắt hẳn rồi mới làm B1/B2
+                    logger.log("     ⏳ Chờ badge 'Cập nhật lịch sử' tắt...")
+                    if not wait_status_gone(modal, kind="refresh", timeout=25):
+                        logger.log("     ⚠️ Badge 'Cập nhật lịch sử' chưa tắt sau timeout, vẫn tiếp tục.")
                 else:
                     if quick_ack_any_popup(driver, root_el=modal):
                         logger.log("     ↻ Bắt gặp popup ở B0 → đã bấm 'Đồng ý', yêu cầu phục hồi.")
@@ -897,7 +934,6 @@ def process_current_record(driver, wait, logger, modal, phase_key=None):
                     logger.log("     ❌ Không bấm được 'Bỏ duyệt' (menu disabled/không thấy).")
             except Exception as e:
                 logger.log(f"     ❌ Lỗi B0: {e.__class__.__name__}")
-            time.sleep(1)
 
         # ====== B1: THI CÔNG → Thêm vào dữ liệu vận hành ======
         logger.log("   - B1 (Thi công): Thêm vào dữ liệu vận hành…")
